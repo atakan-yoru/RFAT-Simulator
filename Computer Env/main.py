@@ -1,0 +1,232 @@
+import time
+import numpy as np
+from scipy.spatial.transform import Rotation as R
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from PyQt5 import QtWidgets, QtCore
+import sys
+
+from Simulator import Target, PathSegment, AntennaPlane, Antenna, DecisionSubsystem, ActuationSubsystem
+from Controller import PIDController, KF
+from Visualizer import System3DVisualizerPG, ConstellationVisualizerPG, SignalTimeVisualizer
+
+
+
+# --- Simulation parameters ---
+fs = 60
+fps = 5
+dt_sim = 1 / fs
+dt_vis = 1 / fps
+refresh_sim_ms = int(dt_sim * 1000)
+refresh_vis_ms = int(dt_vis * 1000)
+
+frame_size = 64
+noise_var = 1
+angle_error_history = []
+
+# --- Target path ---
+
+segments = [
+    # --- Circular sweep at 45° elevation ---
+    PathSegment("spherical",
+                start=[2, np.deg2rad(0), np.deg2rad(45)],
+                end  =[2, np.deg2rad(90), np.deg2rad(45)],
+                dt=dt_sim,
+                angular_speed=np.deg2rad(60),
+                rho_speed=0.2),
+    PathSegment("spherical",
+                start=[0, 0, 0],
+                end  =[2, np.deg2rad(180), np.deg2rad(45)],
+                dt=dt_sim,
+                angular_speed=np.deg2rad(60),
+                rho_speed=0.2),
+
+    # --- Linear climb from edge of circular sweep ---
+    PathSegment("linear",
+                start=[2, 2, 1],
+                end  =[2, 2, 2.5],
+                dt=dt_sim,
+                linear_speed=0.5),
+
+    # --- Circular sweep at higher elevation ---
+    PathSegment("spherical",
+                start=[0, 0, 0],
+                end  =[2, np.deg2rad(270), np.deg2rad(75)],
+                dt=dt_sim,
+                angular_speed=np.deg2rad(20),
+                rho_speed=0.2),
+
+    # --- Diagonal linear translation ---
+    PathSegment("linear",
+                start=[-2, -2, 2.5],
+                end  =[1, 1, 1.5],
+                dt=dt_sim,
+                linear_speed=0.7),
+
+    # --- Low altitude orbit ---
+    PathSegment("spherical",
+                start=[0, 0, 0],
+                end  =[1.5, np.deg2rad(360), np.deg2rad(20)],
+                dt=dt_sim,
+                angular_speed=np.deg2rad(60),
+                rho_speed=0.2),
+
+    # --- Final approach (linear descent) ---
+    PathSegment("linear",
+                start=[0, 0, 0],
+                end  =[-2.0, -2.0, 2.0],
+                dt=dt_sim,
+                linear_speed=2),
+
+    PathSegment("linear",
+                start=[0, 0, 0],
+                end  =[2.0, 2.0, 2.0],
+                dt=dt_sim,
+                linear_speed=2),
+]
+
+
+target = Target(segments)
+initial_az = segments[0].start[1]
+
+# --- Antenna setup ---
+plane = AntennaPlane(position=(0, 0, 0), orientation=[0, 0, 0])
+plane.set_initial_orientation([45, 0, 0])
+tilt = np.deg2rad(25)
+poses = [[tilt, 0, 0]]
+for _ in range(3):
+    poses.append(R.from_euler('z', 90, True).apply(poses[-1]))
+for pose in poses:
+    ant = Antenna(
+        relative_position=[0, 0, 0],
+        relative_orientation=pose,
+        antenna_plane=plane,
+        beamwidth=60
+    )
+    plane.add_antenna(ant)
+
+
+decision = DecisionSubsystem(plane)
+actuation = ActuationSubsystem(plane, decision)
+
+kf_az = KF(frame_size=frame_size, dt=dt_sim, process_var=1e-1, meas_var=1e-3)
+kf_el = KF(frame_size=frame_size, dt=dt_sim, process_var=1e-1, meas_var=1e-3)
+pid_az = PIDController(5.0, 0.5, 0.2, frame_size, 1/dt_sim)
+pid_el = PIDController(5.0, 0.5, 0.2, frame_size, 1/dt_sim)
+
+# --- PyQt GUI setup ---
+app = QtWidgets.QApplication(sys.argv)
+main_window = QtWidgets.QMainWindow()
+central_widget = QtWidgets.QWidget()
+main_layout = QtWidgets.QHBoxLayout()
+central_widget.setLayout(main_layout)
+main_window.setCentralWidget(central_widget)
+main_window.setWindowTitle("RF Tracking - Unified Visualization")
+
+# === Left: 3D View and Control Plot ===
+left_col = QtWidgets.QVBoxLayout()
+main_layout.addLayout(left_col, stretch=2)
+
+vis3d_pg = System3DVisualizerPG(mesh_res=12, show_gain_meshes=False)
+
+vis3d_pg.bind_plane(plane)
+left_col.addWidget(vis3d_pg, stretch=4)
+
+vis_errors = SignalTimeVisualizer()
+left_col.addWidget(vis_errors, stretch=1)
+
+
+labels_layout = QtWidgets.QHBoxLayout()
+angle_error_label = QtWidgets.QLabel("RMS Angular Error: --°")
+sim_time_label = QtWidgets.QLabel("Simulation Time: 0.0s")
+labels_layout.addWidget(sim_time_label)
+labels_layout.addWidget(angle_error_label)
+left_col.addLayout(labels_layout)
+
+# === Right: 3x 2D Constellation Plots ===
+right_col = QtWidgets.QVBoxLayout()
+main_layout.addLayout(right_col, stretch=1)
+vis_meas = ConstellationVisualizerPG("Raw Measurement Errors", point_color=(13, 180, 180))
+vis_kf   = ConstellationVisualizerPG("Kalman Filtered Errors", point_color=(38, 115, 255))
+vis_ctrl = ConstellationVisualizerPG("Control Outputs", point_color=(255, 115, 38))
+right_col.addWidget(vis_meas)
+right_col.addWidget(vis_kf)
+right_col.addWidget(vis_ctrl)
+
+# --- Plot history data ---
+time_log, rms_log, az_log, el_log = [], [], [], []
+sim_time = 0.0
+last_printed_time = -1
+
+# --- Simulation and visualization steps ---
+def simulation_step():
+    sim_start_time = time.time()
+
+    global sim_time, last_printed_time, az_filt, el_filt, ctrl_az, ctrl_el, az_err, el_err
+    sim_time += dt_sim
+    if int(sim_time) > last_printed_time:
+        last_printed_time = int(sim_time)
+        current_az = target.segments[target.current_segment_index].current[1]
+        moved_deg = np.rad2deg((current_az - initial_az) % (2*np.pi))
+        print(f"[t = {int(sim_time)}s] Target azimuth moved: {moved_deg:.2f}°")
+
+    target.move()
+    angle_error = actuation.compute_error_angle(target)
+    angle_error_history.append(angle_error)
+
+    for ant in plane.antennas:
+        ant.receive_signal(target)
+
+    decision.compute_direction_projection()
+    zU, zD, zL, zR = plane.antennas[0].signal_strength, plane.antennas[2].signal_strength, plane.antennas[1].signal_strength, plane.antennas[3].signal_strength
+    zU_vec = np.full(frame_size, zU) + np.random.normal(scale=noise_var, size=frame_size)
+    zD_vec = np.full(frame_size, zD) + np.random.normal(scale=noise_var, size=frame_size)
+    zL_vec = np.full(frame_size, zL) + np.random.normal(scale=noise_var, size=frame_size)
+    zR_vec = np.full(frame_size, zR) + np.random.normal(scale=noise_var, size=frame_size)
+
+    az_err = zR_vec - zL_vec
+    el_err = zU_vec - zD_vec
+    az_filt = kf_az.step(az_err)
+    el_filt = kf_el.step(el_err)
+    ctrl_az = pid_az.compute_control(np.full(frame_size, np.mean(az_filt)))
+    ctrl_el = pid_el.compute_control(np.full(frame_size, np.mean(el_filt)))
+
+    az_new = plane.current_azimuth - np.mean(ctrl_az) * dt_sim
+    el_new = plane.current_elevation - np.mean(ctrl_el) * dt_sim
+    plane.update_orientation(az_new, el_new)
+
+    sim_end_time = time.time()
+    sim_time_step = (sim_end_time - sim_start_time) * 1000  # Convert to milliseconds
+    # print(f"Simulation step took {sim_time_step:.4f} ms")
+
+def visualization_step():
+    t0 = time.time()
+
+    rms_error = np.sqrt(np.mean(np.square(angle_error_history[-50:])))
+    sim_time_label.setText(f"Simulation Time: {sim_time:.2f}s")
+    angle_error_label.setText(f"RMS Angular Error: {rms_error:.2f}°")
+
+    vis_errors.push_data(sim_time, rms_error, np.mean(ctrl_az), np.mean(ctrl_el))
+    t1 = time.time()
+
+
+    vis_meas.push_frame(az_err, el_err)
+    vis_kf.push_frame(az_filt, el_filt)
+    vis_ctrl.push_frame(ctrl_az, ctrl_el)
+    t2 = time.time()
+    vis3d_pg.push_state(target=target, antennas=plane.antennas, plane=plane, estimated_direction=decision.projection)
+    t3 = time.time()
+    # print(f"matplotlib: {(t1 - t0)*1000:.2f} ms | 2D scatter: {(t2 - t1)*1000:.2f} ms | 3D: {(t3 - t2)*1000:.2f} ms")
+
+
+# --- Timers ---
+timer_sim = QtCore.QTimer()
+timer_sim.timeout.connect(simulation_step)
+timer_sim.start(refresh_sim_ms)
+
+timer_vis = QtCore.QTimer()
+timer_vis.timeout.connect(visualization_step)
+timer_vis.start(refresh_vis_ms)
+
+main_window.show()
+app.exec_()

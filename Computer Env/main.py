@@ -14,7 +14,7 @@ from Visualizer import System3DVisualizerPG, ConstellationVisualizerPG, SignalTi
 
 # --- Simulation parameters ---
 fs = 60
-fps = 5
+fps = 30
 dt_sim = 1 / fs
 dt_vis = 1 / fps
 refresh_sim_ms = int(dt_sim * 1000)
@@ -26,68 +26,90 @@ angle_error_history = []
 
 # --- Target path ---
 
-segments = [
-    # --- Circular sweep at 45° elevation ---
-    PathSegment("spherical",
-                start=[2, np.deg2rad(0), np.deg2rad(45)],
-                end  =[2, np.deg2rad(90), np.deg2rad(45)],
-                dt=dt_sim,
-                angular_speed=np.deg2rad(60),
-                rho_speed=0.2),
-    PathSegment("spherical",
-                start=[0, 0, 0],
-                end  =[2, np.deg2rad(180), np.deg2rad(45)],
-                dt=dt_sim,
-                angular_speed=np.deg2rad(60),
-                rho_speed=0.2),
+# segments = [
+#     # --- Circular sweep at 45° elevation ---
+#     PathSegment("spherical",
+#                 start=[2, np.deg2rad(0), np.deg2rad(45)],
+#                 end  =[2, np.deg2rad(90), np.deg2rad(45)],
+#                 dt=dt_sim,
+#                 angular_speed=np.deg2rad(60),
+#                 rho_speed=0.2),
+#     PathSegment("spherical",
+#                 start=[0, 0, 0],
+#                 end  =[2, np.deg2rad(180), np.deg2rad(45)],
+#                 dt=dt_sim,
+#                 angular_speed=np.deg2rad(60),
+#                 rho_speed=0.2),
 
-    # --- Linear climb from edge of circular sweep ---
-    PathSegment("linear",
-                start=[2, 2, 1],
-                end  =[2, 2, 2.5],
-                dt=dt_sim,
-                linear_speed=0.5),
+#     # --- Linear climb from edge of circular sweep ---
+#     PathSegment("linear",
+#                 start=[2, 2, 1],
+#                 end  =[2, 2, 2.5],
+#                 dt=dt_sim,
+#                 linear_speed=0.5),
 
-    # --- Circular sweep at higher elevation ---
-    PathSegment("spherical",
-                start=[0, 0, 0],
-                end  =[2, np.deg2rad(270), np.deg2rad(75)],
-                dt=dt_sim,
-                angular_speed=np.deg2rad(20),
-                rho_speed=0.2),
+#     # --- Circular sweep at higher elevation ---
+#     PathSegment("spherical",
+#                 start=[0, 0, 0],
+#                 end  =[2, np.deg2rad(270), np.deg2rad(75)],
+#                 dt=dt_sim,
+#                 angular_speed=np.deg2rad(20),
+#                 rho_speed=0.2),
 
-    # --- Diagonal linear translation ---
-    PathSegment("linear",
-                start=[-2, -2, 2.5],
-                end  =[1, 1, 1.5],
-                dt=dt_sim,
-                linear_speed=0.7),
+#     # --- Diagonal linear translation ---
+#     PathSegment("linear",
+#                 start=[-2, -2, 2.5],
+#                 end  =[1, 1, 1.5],
+#                 dt=dt_sim,
+#                 linear_speed=0.7),
 
-    # --- Low altitude orbit ---
-    PathSegment("spherical",
-                start=[0, 0, 0],
-                end  =[1.5, np.deg2rad(360), np.deg2rad(20)],
-                dt=dt_sim,
-                angular_speed=np.deg2rad(60),
-                rho_speed=0.2),
+#     # --- Low altitude orbit ---
+#     PathSegment("spherical",
+#                 start=[0, 0, 0],
+#                 end  =[1.5, np.deg2rad(360), np.deg2rad(20)],
+#                 dt=dt_sim,
+#                 angular_speed=np.deg2rad(60),
+#                 rho_speed=0.2),
 
-    # --- Final approach (linear descent) ---
-    PathSegment("linear",
-                start=[0, 0, 0],
-                end  =[-2.0, -2.0, 2.0],
-                dt=dt_sim,
-                linear_speed=2),
+#     # --- Final approach (linear descent) ---
+#     PathSegment("linear",
+#                 start=[0, 0, 0],
+#                 end  =[-2.0, -2.0, 2.0],
+#                 dt=dt_sim,
+#                 linear_speed=2),
 
-    PathSegment("linear",
-                start=[0, 0, 0],
-                end  =[2.0, 2.0, 2.0],
-                dt=dt_sim,
-                linear_speed=2),
-]
+#     PathSegment("linear",
+#                 start=[0, 0, 0],
+#                 end  =[2.0, 2.0, 2.0],
+#                 dt=dt_sim,
+#                 linear_speed=1),
+# ]
+
+
+segments = []
+
+rho = 2  # Constant radius
+elev = np.deg2rad(45)
+angular_speed = np.deg2rad(30)  # or another value you prefer
+dt = dt_sim
+rho_speed = 0.0  # No radial change
+
+for i in range(4*10):
+    start_az = np.deg2rad(i * 45)
+    end_az = np.deg2rad((i + 1) * 45)
+    segment = PathSegment(
+        "spherical",
+        start=[rho, start_az, elev],
+        end=[rho, end_az, elev],
+        dt=dt,
+        angular_speed=angular_speed,
+        rho_speed=rho_speed
+    )
+    segments.append(segment)
+
 
 
 target = Target(segments)
-initial_az = segments[0].start[1]
 
 # --- Antenna setup ---
 plane = AntennaPlane(position=(0, 0, 0), orientation=[0, 0, 0])
@@ -112,7 +134,7 @@ actuation = ActuationSubsystem(plane, decision)
 kf_az = KF(frame_size=frame_size, dt=dt_sim, process_var=1e-1, meas_var=1e-3)
 kf_el = KF(frame_size=frame_size, dt=dt_sim, process_var=1e-1, meas_var=1e-3)
 pid_az = PIDController(5.0, 0.5, 0.2, frame_size, 1/dt_sim)
-pid_el = PIDController(5.0, 0.5, 0.2, frame_size, 1/dt_sim)
+pid_el = PIDController(5.0, 0.5, 0.2, frame_size, 1/dt_sim, output_limits=(-np.deg2rad(10), np.deg2rad(10)))
 
 # --- PyQt GUI setup ---
 app = QtWidgets.QApplication(sys.argv)
@@ -127,7 +149,7 @@ main_window.setWindowTitle("RF Tracking - Unified Visualization")
 left_col = QtWidgets.QVBoxLayout()
 main_layout.addLayout(left_col, stretch=2)
 
-vis3d_pg = System3DVisualizerPG(mesh_res=12, show_gain_meshes=False)
+vis3d_pg = System3DVisualizerPG(mesh_res=12, show_gain_meshes=True)
 
 vis3d_pg.bind_plane(plane)
 left_col.addWidget(vis3d_pg, stretch=4)
@@ -166,9 +188,18 @@ def simulation_step():
     sim_time += dt_sim
     if int(sim_time) > last_printed_time:
         last_printed_time = int(sim_time)
-        current_az = target.segments[target.current_segment_index].current[1]
-        moved_deg = np.rad2deg((current_az - initial_az) % (2*np.pi))
-        print(f"[t = {int(sim_time)}s] Target azimuth moved: {moved_deg:.2f}°")
+
+
+        currnet_segment = target.segments[target.current_segment_index]
+        current_rho = currnet_segment.current[0]
+        current_az = currnet_segment.current[1]
+        current_el = currnet_segment.current[2]
+        
+        print(f"Time: {sim_time:.2f}s | Target | Rho: {current_rho:.2f}m | Azimuth: {np.rad2deg(current_az):.2f}° | Elevation: {np.rad2deg(current_el):.2f}°")
+        print(f"Plane | Azimuth: {np.rad2deg(plane.current_azimuth):.2f}° | Elevation: {np.rad2deg(plane.current_elevation):.2f}°")
+        print("--------------------------------------------")
+        print(f"Control | Azimuth: {np.rad2deg(np.mean(ctrl_az)):.2f}° | Elevation: {np.rad2deg(np.mean(ctrl_el)):.2f}°")
+        print(f"Target Speed | Azimuth: {np.rad2deg(currnet_segment.angular_speed/currnet_segment.dt  ):.2f}°/s | Elevation: {np.rad2deg(currnet_segment.angular_speed/currnet_segment.dt):.2f}°/s")
 
     target.move()
     angle_error = actuation.compute_error_angle(target)

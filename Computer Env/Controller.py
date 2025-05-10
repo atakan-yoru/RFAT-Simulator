@@ -2,23 +2,26 @@ import numpy as np
 
 class PIDController:
     def __init__(self, kp=1.0, ki=0.0, kd=0.0,
-                 frame_size=1024, sampling_frequency=1000.0):
-        self.kp = kp  # Proportional gain
-        self.ki = ki  # Integral gain
-        self.kd = kd  # Derivative gain
+                 frame_size=1024, sampling_frequency=1000.0,
+                 output_limits=(-np.inf, np.inf)):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
 
         self.frame_size = frame_size
-        self.sampling_frequency = sampling_frequency  # in Hz
-        self.dt = 1.0 / sampling_frequency            # sample period (seconds)
+        self.sampling_frequency = sampling_frequency
+        self.dt = 1.0 / sampling_frequency
 
-        # Initialize state memory
         self.previous_error = np.zeros(frame_size, dtype=np.float32)
         self.integral = np.zeros(frame_size, dtype=np.float32)
+
+        # Output saturation limits
+        self.output_min, self.output_max = output_limits
 
     def compute_control(self, error_vector):
         """
         Compute PID control signals for a batch (vector) of errors,
-        correctly scaled according to sampling time (dt).
+        correctly scaled according to sampling time (dt), and clipped to output limits.
         
         Parameters
         ----------
@@ -31,24 +34,21 @@ class PIDController:
         """
         error_vector = np.asarray(error_vector, dtype=np.float32)
 
-        # Update integral: sum(error * dt)
         self.integral += error_vector * self.dt
-
-        # Derivative: (error_now - error_prev) / dt
         derivative = (error_vector - self.previous_error) / self.dt
-
-        # Save error for next step
         self.previous_error = error_vector.copy()
 
-        # PID equation
         control_signal = (self.kp * error_vector +
                           self.ki * self.integral +
                           self.kd * derivative)
 
-        # Threshold tiny values
         control_signal[np.abs(control_signal) < 1e-6] = 0.0
 
+        # Apply output saturation
+        control_signal = np.clip(control_signal, self.output_min, self.output_max)
+
         return control_signal
+
 
 class EKF:
     """

@@ -6,22 +6,78 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from PyQt5 import QtWidgets, QtCore
 import sys
 
+
 from Simulator import Target, PathSegment, AntennaPlane, Antenna, DecisionSubsystem, ActuationSubsystem
 from Controller import PIDController, KF
 from Visualizer import System3DVisualizerPG, ConstellationVisualizerPG, SignalTimeVisualizer
 
+from btCom import BluetoothReader
+import serial
 
+el_feedback = None
+az_feedback = None
+el_speed = 0.0
+az_speed = 0.0
+
+def handle_feedback(axis, value):
+    global az_feedback, el_feedback
+    if axis == "az":
+        az_feedback = value
+    elif axis == "el":
+        el_feedback = value
+
+
+EL_PORT = "COM14"  # COM 12/13
+AZ_PORT = "COM12"  # COM 14/15
+BLUETOOTH_BAUD = 115200
+
+
+el_serial = None
+az_serial = None
+
+try:
+    el_serial = serial.Serial(EL_PORT, BLUETOOTH_BAUD, timeout=0.1)
+    print(f"[BT EL] Connected to {EL_PORT}")
+except Exception as e:
+    print(f"[BT EL] Failed to connect to {EL_PORT}: {e}")
+
+try:
+    az_serial = serial.Serial(AZ_PORT, BLUETOOTH_BAUD, timeout=0.1)
+    print(f"[BT AZ] Connected to {AZ_PORT}")
+except Exception as e:
+    print(f"[BT AZ] Failed to connect to {AZ_PORT}: {e}")
+
+
+bt_thread_el = BluetoothReader(el_serial, "el", lambda: el_speed)
+bt_thread_el.feedback_received.connect(handle_feedback)
+bt_thread_el.start()
+
+bt_thread_az = BluetoothReader(az_serial, "az", lambda: az_speed)
+bt_thread_az.feedback_received.connect(handle_feedback)
+bt_thread_az.start()
+
+
+def on_exit():
+    bt_thread_el.stop()
+    bt_thread_az.stop()
+
+# & "C:\Program Files\mosquitto\mosquitto.exe" -v
+# & "C:\Program Files\mosquitto\mosquitto.exe" -c "D:\Academic\#4th\EE493 & 494\##Simulation\Computer Env\mosquitto.conf" -v
+# netstat -aon | findstr :1883
+# taskkill /PID 26716 /F
 
 # --- Simulation parameters ---
-fs = 60
+fs = 25
 fps = 30
 dt_sim = 1 / fs
 dt_vis = 1 / fps
 refresh_sim_ms = int(dt_sim * 1000)
 refresh_vis_ms = int(dt_vis * 1000)
+bt_refresh_ms = 5
 
+use_feeedback = True
 frame_size = 64
-noise_var = 1
+noise_var = 0
 angle_error_history = []
 
 # --- Target path ---
@@ -86,26 +142,65 @@ angle_error_history = []
 # ]
 
 
-segments = []
+# segments = []
 
-rho = 2  # Constant radius
-elev = np.deg2rad(45)
-angular_speed = np.deg2rad(30)  # or another value you prefer
-dt = dt_sim
-rho_speed = 0.0  # No radial change
+# rho = 2  # Constant radius
+# elev = np.deg2rad(45)
+# angular_speed = np.deg2rad(60)  # or another value you prefer
+# dt = dt_sim
+# rho_speed = 0.0  # No radial change
 
-for i in range(4*10):
-    start_az = np.deg2rad(i * 45)
-    end_az = np.deg2rad((i + 1) * 45)
-    segment = PathSegment(
-        "spherical",
-        start=[rho, start_az, elev],
-        end=[rho, end_az, elev],
-        dt=dt,
-        angular_speed=angular_speed,
-        rho_speed=rho_speed
-    )
-    segments.append(segment)
+# for i in range(4*10):
+#     start_az = np.deg2rad(i * 45)
+#     end_az = np.deg2rad((i + 1) * 45)
+#     segment = PathSegment(
+#         "spherical",
+#         start=[rho, start_az, elev],
+#         end=[rho, end_az, elev],
+#         dt=dt,
+#         angular_speed=angular_speed,
+#         rho_speed=rho_speed
+#     )
+#     segments.append(segment)
+
+
+segments = [
+    # --- [1] Quarter circle sweep at 45° elevation (azimuth 0 → 90°) ---
+    PathSegment("spherical",
+                start=[2, np.deg2rad(0), np.deg2rad(45)],
+                end  =[2, np.deg2rad(90), np.deg2rad(45)],
+                dt=dt_sim,
+                angular_speed=np.deg2rad(30),
+                rho_speed=0.0),
+    PathSegment("spherical",
+                start=[2, np.deg2rad(0), np.deg2rad(45)],
+                end  =[2, np.deg2rad(0), np.deg2rad(45)],
+                dt=dt_sim,
+                angular_speed=np.deg2rad(30),
+                rho_speed=0.0),
+    PathSegment("spherical",
+                start=[2, np.deg2rad(0), np.deg2rad(45)],
+                end  =[2, np.deg2rad(90), np.deg2rad(45)],
+                dt=dt_sim,
+                angular_speed=np.deg2rad(30),
+                rho_speed=0.0),
+
+    # --- [2] Elevation flip: 45° → 135° at constant azimuth (az = 90°) ---
+    PathSegment("spherical",
+                start=[2, np.deg2rad(90), np.deg2rad(45)],
+                end  =[2, np.deg2rad(90), np.deg2rad(135)],
+                dt=dt_sim,
+                angular_speed=np.deg2rad(15),
+                rho_speed=0.0),
+
+    # --- [3] Second quarter circle sweep at 135° elevation (azimuth 90 → 180°) ---
+    PathSegment("spherical",
+                start=[2, np.deg2rad(90), np.deg2rad(135)],
+                end  =[2, np.deg2rad(180), np.deg2rad(135)],
+                dt=dt_sim,
+                angular_speed=np.deg2rad(30),
+                rho_speed=0.0),
+]
 
 
 
@@ -113,7 +208,9 @@ target = Target(segments)
 
 # --- Antenna setup ---
 plane = AntennaPlane(position=(0, 0, 0), orientation=[0, 0, 0])
-plane.set_initial_orientation([45, 0, 0])
+plane.set_initial_orientation(90,0)
+# plane.current_elevation = np.deg2rad(45)
+
 tilt = np.deg2rad(25)
 poses = [[tilt, 0, 0]]
 for _ in range(3):
@@ -133,8 +230,12 @@ actuation = ActuationSubsystem(plane, decision)
 
 kf_az = KF(frame_size=frame_size, dt=dt_sim, process_var=1e-1, meas_var=1e-3)
 kf_el = KF(frame_size=frame_size, dt=dt_sim, process_var=1e-1, meas_var=1e-3)
-pid_az = PIDController(5.0, 0.5, 0.2, frame_size, 1/dt_sim)
-pid_el = PIDController(5.0, 0.5, 0.2, frame_size, 1/dt_sim, output_limits=(-np.deg2rad(10), np.deg2rad(10)))
+# pid_az = PIDController(3.8799, 1.0468, 0.2626, frame_size, 1/dt_sim)
+# pid_el = PIDController(3.8799, 1.0468, 0.2626, frame_size, 1/dt_sim, output_limits=(-np.deg2rad(300), np.deg2rad(300)))
+
+pid_az = PIDController(1.5, 0.5, 0.1, frame_size, 1/dt_sim)
+pid_el = PIDController(1.5, 0.5, 0.1, frame_size, 1/dt_sim, output_limits=(-np.deg2rad(300), np.deg2rad(300)))
+
 
 # --- PyQt GUI setup ---
 app = QtWidgets.QApplication(sys.argv)
@@ -185,10 +286,10 @@ def simulation_step():
     sim_start_time = time.time()
 
     global sim_time, last_printed_time, az_filt, el_filt, ctrl_az, ctrl_el, az_err, el_err
+    global el_feedback, el_speed, az_feedback, az_speed
     sim_time += dt_sim
     if int(sim_time) > last_printed_time:
         last_printed_time = int(sim_time)
-
 
         currnet_segment = target.segments[target.current_segment_index]
         current_rho = currnet_segment.current[0]
@@ -222,9 +323,25 @@ def simulation_step():
     ctrl_az = pid_az.compute_control(np.full(frame_size, np.mean(az_filt)))
     ctrl_el = pid_el.compute_control(np.full(frame_size, np.mean(el_filt)))
 
-    az_new = plane.current_azimuth - np.mean(ctrl_az) * dt_sim
-    el_new = plane.current_elevation - np.mean(ctrl_el) * dt_sim
+
+    az_speed = float(np.mean(ctrl_az))  
+    el_speed = float(np.mean(ctrl_el))
+
+    if az_feedback is not None and use_feeedback:
+        print(f"Az Motor Angle: {az_feedback:.2f}°")
+        az_new = np.deg2rad(az_feedback)
+    else:
+        az_new = plane.current_azimuth - az_speed * dt_sim
+
+    if el_feedback is not None and use_feeedback:
+        print(f"El Motor Angle: {el_feedback:.2f}°")
+        el_new = np.deg2rad(el_feedback)
+    else:
+        el_new = plane.current_elevation - el_speed * dt_sim
+
+    # el_new = plane.current_elevation -  el_speed * dt_sim
     plane.update_orientation(az_new, el_new)
+
 
     sim_end_time = time.time()
     sim_time_step = (sim_end_time - sim_start_time) * 1000  # Convert to milliseconds
@@ -260,4 +377,5 @@ timer_vis.timeout.connect(visualization_step)
 timer_vis.start(refresh_vis_ms)
 
 main_window.show()
+app.aboutToQuit.connect(on_exit)
 app.exec_()

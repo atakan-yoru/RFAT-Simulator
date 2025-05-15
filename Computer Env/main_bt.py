@@ -18,6 +18,7 @@ el_feedback = None
 az_feedback = None
 el_speed = 0.0
 az_speed = 0.0
+search_mode = 0
 
 def handle_feedback(axis, value):
     global az_feedback, el_feedback
@@ -27,8 +28,8 @@ def handle_feedback(axis, value):
         el_feedback = value
 
 
-EL_PORT = "COM14"  # COM 12/13
-AZ_PORT = "COM12"  # COM 14/15
+EL_PORT = "COM12"  # COM 12/13
+AZ_PORT = "COM16"  # COM 14/15
 BLUETOOTH_BAUD = 115200
 
 
@@ -48,11 +49,11 @@ except Exception as e:
     print(f"[BT AZ] Failed to connect to {AZ_PORT}: {e}")
 
 
-bt_thread_el = BluetoothReader(el_serial, "el", lambda: el_speed)
+bt_thread_el = BluetoothReader(el_serial, "el", lambda: el_speed, lambda: search_mode)
 bt_thread_el.feedback_received.connect(handle_feedback)
 bt_thread_el.start()
 
-bt_thread_az = BluetoothReader(az_serial, "az", lambda: az_speed)
+bt_thread_az = BluetoothReader(az_serial, "az", lambda: az_speed, lambda: search_mode)
 bt_thread_az.feedback_received.connect(handle_feedback)
 bt_thread_az.start()
 
@@ -74,11 +75,24 @@ dt_vis = 1 / fps
 refresh_sim_ms = int(dt_sim * 1000)
 refresh_vis_ms = int(dt_vis * 1000)
 bt_refresh_ms = 5
+search_threshold = 0.1
 
 use_feeedback = True
 frame_size = 64
 noise_var = 0
 angle_error_history = []
+
+
+#–– initialize globals so visualization always has something valid
+az_err    = np.zeros(frame_size, dtype=np.float32)
+el_err    = np.zeros(frame_size, dtype=np.float32)
+az_filt   = np.zeros(frame_size, dtype=np.float32)
+el_filt   = np.zeros(frame_size, dtype=np.float32)
+ctrl_az   = np.zeros(frame_size, dtype=np.float32)
+ctrl_el   = np.zeros(frame_size, dtype=np.float32)
+angle_error_history = [0.0] * 50
+
+# az_feedback = np.deg2rad(0)
 
 # --- Target path ---
 
@@ -168,47 +182,46 @@ segments = [
     # --- [1] Quarter circle sweep at 45° elevation (azimuth 0 → 90°) ---
     PathSegment("spherical",
                 start=[2, np.deg2rad(0), np.deg2rad(45)],
-                end  =[2, np.deg2rad(90), np.deg2rad(45)],
+                end  =[2, np.deg2rad(-90), np.deg2rad(45)],
                 dt=dt_sim,
-                angular_speed=np.deg2rad(30),
+                angular_speed=np.deg2rad(15),
                 rho_speed=0.0),
     PathSegment("spherical",
                 start=[2, np.deg2rad(0), np.deg2rad(45)],
                 end  =[2, np.deg2rad(0), np.deg2rad(45)],
                 dt=dt_sim,
-                angular_speed=np.deg2rad(30),
+                angular_speed=np.deg2rad(15),
                 rho_speed=0.0),
     PathSegment("spherical",
                 start=[2, np.deg2rad(0), np.deg2rad(45)],
-                end  =[2, np.deg2rad(90), np.deg2rad(45)],
+                end  =[2, np.deg2rad(-90), np.deg2rad(45)],
                 dt=dt_sim,
-                angular_speed=np.deg2rad(30),
+                angular_speed=np.deg2rad(15),
                 rho_speed=0.0),
 
     # --- [2] Elevation flip: 45° → 135° at constant azimuth (az = 90°) ---
     PathSegment("spherical",
-                start=[2, np.deg2rad(90), np.deg2rad(45)],
-                end  =[2, np.deg2rad(90), np.deg2rad(135)],
+                start=[2, np.deg2rad(-90), np.deg2rad(45)],
+                end  =[2, np.deg2rad(-90), np.deg2rad(135)],
                 dt=dt_sim,
                 angular_speed=np.deg2rad(15),
                 rho_speed=0.0),
 
     # --- [3] Second quarter circle sweep at 135° elevation (azimuth 90 → 180°) ---
     PathSegment("spherical",
-                start=[2, np.deg2rad(90), np.deg2rad(135)],
-                end  =[2, np.deg2rad(180), np.deg2rad(135)],
+                start=[2, np.deg2rad(-90), np.deg2rad(135)],
+                end  =[2, np.deg2rad(-180), np.deg2rad(135)],
                 dt=dt_sim,
-                angular_speed=np.deg2rad(30),
+                angular_speed=np.deg2rad(15),
                 rho_speed=0.0),
 ]
-
 
 
 target = Target(segments)
 
 # --- Antenna setup ---
 plane = AntennaPlane(position=(0, 0, 0), orientation=[0, 0, 0])
-plane.set_initial_orientation(90,0)
+plane.set_initial_orientation(-30,45)
 # plane.current_elevation = np.deg2rad(45)
 
 tilt = np.deg2rad(25)
@@ -250,7 +263,7 @@ main_window.setWindowTitle("RF Tracking - Unified Visualization")
 left_col = QtWidgets.QVBoxLayout()
 main_layout.addLayout(left_col, stretch=2)
 
-vis3d_pg = System3DVisualizerPG(mesh_res=12, show_gain_meshes=True)
+vis3d_pg = System3DVisualizerPG(mesh_res=12, show_gain_meshes=False)
 
 vis3d_pg.bind_plane(plane)
 left_col.addWidget(vis3d_pg, stretch=4)
@@ -286,7 +299,7 @@ def simulation_step():
     sim_start_time = time.time()
 
     global sim_time, last_printed_time, az_filt, el_filt, ctrl_az, ctrl_el, az_err, el_err
-    global el_feedback, el_speed, az_feedback, az_speed
+    global el_feedback, el_speed, az_feedback, az_speed, search_mode
     sim_time += dt_sim
     if int(sim_time) > last_printed_time:
         last_printed_time = int(sim_time)
@@ -301,6 +314,7 @@ def simulation_step():
         print("--------------------------------------------")
         print(f"Control | Azimuth: {np.rad2deg(np.mean(ctrl_az)):.2f}° | Elevation: {np.rad2deg(np.mean(ctrl_el)):.2f}°")
         print(f"Target Speed | Azimuth: {np.rad2deg(currnet_segment.angular_speed/currnet_segment.dt  ):.2f}°/s | Elevation: {np.rad2deg(currnet_segment.angular_speed/currnet_segment.dt):.2f}°/s")
+        print(f"Search Mode: {search_mode}")
 
     target.move()
     angle_error = actuation.compute_error_angle(target)
@@ -315,6 +329,11 @@ def simulation_step():
     zD_vec = np.full(frame_size, zD) + np.random.normal(scale=noise_var, size=frame_size)
     zL_vec = np.full(frame_size, zL) + np.random.normal(scale=noise_var, size=frame_size)
     zR_vec = np.full(frame_size, zR) + np.random.normal(scale=noise_var, size=frame_size)
+
+    if max(zU, zD, zL, zR) < search_threshold:
+        search_mode = 1
+    else: 
+        search_mode = 0
 
     az_err = zR_vec - zL_vec
     el_err = zU_vec - zD_vec

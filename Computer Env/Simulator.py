@@ -317,12 +317,42 @@ class AntennaPlane:
         - desired_orientation: A list of Euler angles [roll, pitch, yaw] in degrees.
         """
         # Update the plane's orientation
-        self.update_orientation(np.deg2rad(azimuth), np.deg2rad(elevation))
-        
 
-        # Update the transformations for all attached antennas
+        azimuth= np.deg2rad(azimuth)
+        elevation = np.deg2rad(elevation)
+
+        delta_azimuth = azimuth - self.current_azimuth
+        delta_elevation = elevation - self.current_elevation
+
+        # Update the stored target angles.
+        self.current_azimuth = azimuth % (2 * np.pi)
+        self.current_elevation = elevation % np.pi
+
+        azimuth_rotation = R.from_euler('z', delta_azimuth, degrees=False)
+
+        # Step 2: Get the current local azimuth and elevation unit vectors from the plane's orientation.
+        local_azimuth_vector, _ = OrientationUtils.get_local_azimuth_elevation_vectors(self)
+        
+        # Check for degenerate case: if the plane's forward (normal) vector is nearly [0, 0, 1],
+        # the computed local azimuth vector might be ambiguous.
+        # In that case, rotate the standard [1, 0, 0] vector by the delta azimuth to get the effective azimuth direction.
+        forward = OrientationUtils.quat_to_vector(self)
+        if np.linalg.norm(forward - np.array([0.0, 0.0, 1.0])) < 1e-6:
+            local_azimuth_vector = azimuth_rotation.apply(np.array([1.0, 0.0, 0.0]))
+
+        # Step 3: Create the relative elevation (pitch) rotation about the computed azimuth vector.
+        elevation_rotation = R.from_rotvec(-delta_elevation * local_azimuth_vector)
+
+        # Step 4: Combine the relative rotations with the current orientation.
+        new_rotation =   elevation_rotation * azimuth_rotation * R.from_quat(self.orientation)
+        
+        # Update the antenna plane's orientation.
+        self.orientation = new_rotation.as_quat()
+
+        # Update the transformations for all attached antennas.
         for antenna in self.antennas:
             antenna.update_global_transform()
+        
 
         # Update local azimuth and elevation vectors
         azimuth_vector, elevation_vector = OrientationUtils.get_local_azimuth_elevation_vectors(self)
@@ -345,8 +375,11 @@ class AntennaPlane:
         delta_elevation = new_elevation_angle - self.current_elevation
 
         # Update the stored target angles.
-        self.current_azimuth = np.clip(new_azimuth_angle, 0, 2*np.pi)
-        self.current_elevation = np.clip(new_elevation_angle, 0, np.pi)
+        # self.current_azimuth = np.clip(new_azimuth_angle, 0, 2*np.pi)
+        # self.current_elevation = np.clip(new_elevation_angle, 0, np.pi)
+
+        self.current_azimuth = new_azimuth_angle % (2 * np.pi)
+        self.current_elevation = new_elevation_angle % np.pi
         # self.current_azimuth = new_azimuth_angle
         # self.current_elevation = new_elevation_angle
 
@@ -367,7 +400,7 @@ class AntennaPlane:
         elevation_rotation = R.from_rotvec(-delta_elevation * local_azimuth_vector)
 
         # Step 4: Combine the relative rotations with the current orientation.
-        new_rotation =  elevation_rotation * azimuth_rotation * R.from_quat(self.orientation)
+        new_rotation =  azimuth_rotation* elevation_rotation * R.from_quat(self.orientation)
         
         # Update the antenna plane's orientation.
         self.orientation = new_rotation.as_quat()

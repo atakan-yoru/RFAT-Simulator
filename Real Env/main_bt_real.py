@@ -14,10 +14,15 @@ from Visualizer import System3DVisualizerPG, ConstellationVisualizerPG, SignalTi
 from btCom import BluetoothReader
 import serial
 
+from GNU_rx import RSSI_4lu
+is_sim = True
+
+
 el_feedback = None
 az_feedback = None
 el_speed = 0.0
 az_speed = 0.0
+searh_mode = 0
 
 def handle_feedback(axis, value):
     global az_feedback, el_feedback
@@ -56,10 +61,26 @@ bt_thread_az = BluetoothReader(az_serial, "az", lambda: az_speed)
 bt_thread_az.feedback_received.connect(handle_feedback)
 bt_thread_az.start()
 
+## --- Real SDR setup ---
+
+if not is_sim:
+    # You can put your actual Pluto IPs here or read from args
+    SDR_AZ_IP = "ip:192.168.2.1"
+    SDR_EL_IP = "ip:192.168.3.1"
+
+    tb = RSSI_4lu(SDR_AZ_IP, SDR_EL_IP)
+    tb.start()
+    time.sleep(1.0)        # let the buffers fill
+else:
+    tb = None
 
 def on_exit():
     bt_thread_el.stop()
     bt_thread_az.stop()
+    if tb is not None:
+        tb.stop()
+        tb.wait()
+
 
 # & "C:\Program Files\mosquitto\mosquitto.exe" -v
 # & "C:\Program Files\mosquitto\mosquitto.exe" -c "D:\Academic\#4th\EE493 & 494\##Simulation\Computer Env\mosquitto.conf" -v
@@ -75,93 +96,23 @@ refresh_sim_ms = int(dt_sim * 1000)
 refresh_vis_ms = int(dt_vis * 1000)
 bt_refresh_ms = 5
 
+search_threshold = 0.1
 use_feeedback = True
 frame_size = 64
 noise_var = 0
 angle_error_history = []
 
-# --- Target path ---
 
-# segments = [
-#     # --- Circular sweep at 45° elevation ---
-#     PathSegment("spherical",
-#                 start=[2, np.deg2rad(0), np.deg2rad(45)],
-#                 end  =[2, np.deg2rad(90), np.deg2rad(45)],
-#                 dt=dt_sim,
-#                 angular_speed=np.deg2rad(60),
-#                 rho_speed=0.2),
-#     PathSegment("spherical",
-#                 start=[0, 0, 0],
-#                 end  =[2, np.deg2rad(180), np.deg2rad(45)],
-#                 dt=dt_sim,
-#                 angular_speed=np.deg2rad(60),
-#                 rho_speed=0.2),
+#–– initialize globals so visualization always has something valid
+az_err    = np.zeros(frame_size, dtype=np.float32)
+el_err    = np.zeros(frame_size, dtype=np.float32)
+az_filt   = np.zeros(frame_size, dtype=np.float32)
+el_filt   = np.zeros(frame_size, dtype=np.float32)
+ctrl_az   = np.zeros(frame_size, dtype=np.float32)
+ctrl_el   = np.zeros(frame_size, dtype=np.float32)
+angle_error_history = [0.0] * 50
+# az_feedback = np.deg2rad(0)
 
-#     # --- Linear climb from edge of circular sweep ---
-#     PathSegment("linear",
-#                 start=[2, 2, 1],
-#                 end  =[2, 2, 2.5],
-#                 dt=dt_sim,
-#                 linear_speed=0.5),
-
-#     # --- Circular sweep at higher elevation ---
-#     PathSegment("spherical",
-#                 start=[0, 0, 0],
-#                 end  =[2, np.deg2rad(270), np.deg2rad(75)],
-#                 dt=dt_sim,
-#                 angular_speed=np.deg2rad(20),
-#                 rho_speed=0.2),
-
-#     # --- Diagonal linear translation ---
-#     PathSegment("linear",
-#                 start=[-2, -2, 2.5],
-#                 end  =[1, 1, 1.5],
-#                 dt=dt_sim,
-#                 linear_speed=0.7),
-
-#     # --- Low altitude orbit ---
-#     PathSegment("spherical",
-#                 start=[0, 0, 0],
-#                 end  =[1.5, np.deg2rad(360), np.deg2rad(20)],
-#                 dt=dt_sim,
-#                 angular_speed=np.deg2rad(60),
-#                 rho_speed=0.2),
-
-#     # --- Final approach (linear descent) ---
-#     PathSegment("linear",
-#                 start=[0, 0, 0],
-#                 end  =[-2.0, -2.0, 2.0],
-#                 dt=dt_sim,
-#                 linear_speed=2),
-
-#     PathSegment("linear",
-#                 start=[0, 0, 0],
-#                 end  =[2.0, 2.0, 2.0],
-#                 dt=dt_sim,
-#                 linear_speed=1),
-# ]
-
-
-# segments = []
-
-# rho = 2  # Constant radius
-# elev = np.deg2rad(45)
-# angular_speed = np.deg2rad(60)  # or another value you prefer
-# dt = dt_sim
-# rho_speed = 0.0  # No radial change
-
-# for i in range(4*10):
-#     start_az = np.deg2rad(i * 45)
-#     end_az = np.deg2rad((i + 1) * 45)
-#     segment = PathSegment(
-#         "spherical",
-#         start=[rho, start_az, elev],
-#         end=[rho, end_az, elev],
-#         dt=dt,
-#         angular_speed=angular_speed,
-#         rho_speed=rho_speed
-#     )
-#     segments.append(segment)
 
 
 segments = [
@@ -208,7 +159,7 @@ target = Target(segments)
 
 # --- Antenna setup ---
 plane = AntennaPlane(position=(0, 0, 0), orientation=[0, 0, 0])
-plane.set_initial_orientation(90,0)
+plane.set_initial_orientation(90,45)
 # plane.current_elevation = np.deg2rad(45)
 
 tilt = np.deg2rad(25)
@@ -302,22 +253,33 @@ def simulation_step():
         print(f"Control | Azimuth: {np.rad2deg(np.mean(ctrl_az)):.2f}° | Elevation: {np.rad2deg(np.mean(ctrl_el)):.2f}°")
         print(f"Target Speed | Azimuth: {np.rad2deg(currnet_segment.angular_speed/currnet_segment.dt  ):.2f}°/s | Elevation: {np.rad2deg(currnet_segment.angular_speed/currnet_segment.dt):.2f}°/s")
 
-    target.move()
-    angle_error = actuation.compute_error_angle(target)
-    angle_error_history.append(angle_error)
+#-------
 
-    for ant in plane.antennas:
-        ant.receive_signal(target)
+#-------
 
-    decision.compute_direction_projection()
-    zU, zD, zL, zR = plane.antennas[0].signal_strength, plane.antennas[2].signal_strength, plane.antennas[1].signal_strength, plane.antennas[3].signal_strength
-    zU_vec = np.full(frame_size, zU) + np.random.normal(scale=noise_var, size=frame_size)
-    zD_vec = np.full(frame_size, zD) + np.random.normal(scale=noise_var, size=frame_size)
-    zL_vec = np.full(frame_size, zL) + np.random.normal(scale=noise_var, size=frame_size)
-    zR_vec = np.full(frame_size, zR) + np.random.normal(scale=noise_var, size=frame_size)
+    if is_sim:
+        target.move()
+        angle_error = actuation.compute_error_angle(target)
+        angle_error_history.append(angle_error)
 
-    az_err = zR_vec - zL_vec
-    el_err = zU_vec - zD_vec
+        for ant in plane.antennas:
+            ant.receive_signal(target)
+
+        decision.compute_direction_projection()
+        zU, zD, zL, zR = plane.antennas[0].signal_strength, plane.antennas[2].signal_strength, plane.antennas[1].signal_strength, plane.antennas[3].signal_strength
+        zU_vec = np.full(frame_size, zU) + np.random.normal(scale=noise_var, size=frame_size)
+        zD_vec = np.full(frame_size, zD) + np.random.normal(scale=noise_var, size=frame_size)
+        zL_vec = np.full(frame_size, zL) + np.random.normal(scale=noise_var, size=frame_size)
+        zR_vec = np.full(frame_size, zR) + np.random.normal(scale=noise_var, size=frame_size)
+
+        az_err = zR_vec - zL_vec
+        el_err = zU_vec - zD_vec
+
+    else:
+        az_err = np.array(tb.data_vector_x.level(), dtype=np.float32)
+        el_err = np.array(tb.data_vector_y.level(), dtype=np.float32)
+
+
     az_filt = kf_az.step(az_err)
     el_filt = kf_el.step(el_err)
     ctrl_az = pid_az.compute_control(np.full(frame_size, np.mean(az_filt)))

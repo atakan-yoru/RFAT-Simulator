@@ -95,9 +95,29 @@ class System3DVisualizerPG(QtWidgets.QWidget):
         self.view.addItem(self.path)
         self.est_vector = gl.GLLinePlotItem()
         self.view.addItem(self.est_vector)
-        self.plane_patch = gl.GLMeshItem()
+        
+        # --- Prevent NoneType-on-first-paint by giving a tiny default quad ---
+        size = 0.5
+        dummy_verts = np.array([
+            [-size, -size, 0],
+            [ size, -size, 0],
+            [ size,  size, 0],
+            [-size,  size, 0],
+        ], dtype=np.float32)
+        dummy_faces = np.array([[0,1,2],[0,2,3]], dtype=np.int32)
+
+        self.plane_patch = gl.GLMeshItem(
+            vertexes=dummy_verts,
+            faces=dummy_faces,
+            color=(0.4, 0.2, 1.0, 0.4),
+            drawEdges=True,
+            smooth=False
+        )
         self.plane_normal = gl.GLLinePlotItem()
         self.view.addItem(self.plane_patch)
+        self.view.addItem(self.plane_normal)
+
+
         self.view.addItem(self.plane_normal)
         self.show_gain_meshes = show_gain_meshes
         

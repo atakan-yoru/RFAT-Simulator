@@ -13,7 +13,7 @@ from Controller import PIDController, KF
 from Visualizer import System3DVisualizerPG, ConstellationVisualizerPG, SignalTimeVisualizer, FFTVisualizerPG
 
 from btCom import BluetoothReader
-from chirp_tx_no_jam import chirp_tx_no_jam as ChirpTopBlock
+from chirp_tx_jam import chirp_tx_jam as ChirpTopBlock
 import test_paths
 
 el_feedback = None
@@ -107,14 +107,22 @@ search_threshold = 1e-3
 
 frame_size = 32
 noise_var = 0
+SNR = 0
+# SNR = 13 #10W için
+# SNR = 3 # 1W için
+# SNR = -60 # fail için
+# SNR = -40 # 1 fail boundary ~ 10 microwatt, thermal noise yok
 LARGE_VALUE = 1e6
 SMALL_VALUE = 1e-6
 search_timeout = 1.0  # 1 second timeout
 
 angle_error_history = []
+SNR_rec_history = []
 
 
 #–– initialize globals so visualization always has something valid
+
+
 az_err    = np.zeros(frame_size, dtype=np.float32)
 el_err    = np.zeros(frame_size, dtype=np.float32)
 az_err_norm = np.zeros(frame_size, dtype=np.float32)
@@ -128,13 +136,24 @@ rise_time_flag = False
 rise_time = 0.0
 rise_time_ref = 0.0
 setling_time = 0.0
+SNR_rec = 0.0
 rms_error = 0.0
 last_threshold_time = 0.0  # Time when signal first went below threshold
 is_below_threshold = False
 
+
 # --- Target setup ---
 base_path = test_paths.test_circle(dt_sim, angular_speed=np.deg2rad(15))
-base_path = test_paths.test_11(dt_sim)
+base_path = test_paths.test_6(dt_sim) # Full circle 15
+
+base_path = test_paths.test_7(dt_sim) # Full circle 15->30
+base_path = test_paths.test_8(dt_sim) # Full circle elevation change
+
+# base_path = test_paths.test_9(dt_sim) # Complex path eveything changes
+# base_path = test_paths.test_10(dt_sim) # Spiral path
+base_path = test_paths.test_11(dt_sim) # Elevation change
+# base_path = test_paths.test_12(dt_sim) # Search Mode Path
+
 repeated_paths = PathUtils.repeat_paths(base_path, 10)
 target = Target(repeated_paths)
 
@@ -142,8 +161,8 @@ target = Target(repeated_paths)
 
 jammer_path = [
         PathSegment("spherical",
-            start=[200000, np.deg2rad(45), np.deg2rad(45)],
-            end  =[200000, np.deg2rad(0), np.deg2rad(45)],
+            start=[4, np.deg2rad(45), np.deg2rad(45)],
+            end  =[4, np.deg2rad(0), np.deg2rad(45)],
             dt=dt_sim,
             angular_speed=[np.deg2rad(0), 0],
             rho_speed=0.0)
@@ -197,7 +216,7 @@ main_window.setWindowTitle("RF Tracking - Unified Visualization")
 left_col = QtWidgets.QVBoxLayout()
 main_layout.addLayout(left_col, stretch=2)
 
-vis3d_pg = System3DVisualizerPG(mesh_res=12, show_gain_meshes=False)
+vis3d_pg = System3DVisualizerPG(mesh_res=12, show_gain_meshes=True)
 
 vis3d_pg.bind_plane(plane)
 left_col.addWidget(vis3d_pg, stretch=4)
@@ -214,11 +233,13 @@ setling_time_label = QtWidgets.QLabel("Settling Time: --s")
 rise_time_ref_label = QtWidgets.QLabel("Rise Time Reference: --s")
 rise_time_ref_label.setStyleSheet("color: red; font-weight: bold;")
 search_mode_label = QtWidgets.QLabel("Search Mode: 0")
+recieved_SNR_label = QtWidgets.QLabel(f"Received SNR: {SNR_rec} dB")
 labels_layout.addWidget(rise_time_label)
 labels_layout.addWidget(setling_time_label)
 labels_layout.addWidget(sim_time_label)
 labels_layout.addWidget(angle_error_label)
 labels_layout.addWidget(search_mode_label)
+labels_layout.addWidget(recieved_SNR_label)
 labels_layout.addWidget(rise_time_ref_label)
 left_col.addLayout(labels_layout)
 
@@ -260,7 +281,9 @@ fft_layout.addWidget(fft_size_combo)
 
 # Create two FFT plots
 fft_plot_chirp = FFTVisualizerPG("Chirp Signal FFT", fft_size=256, fs=fs)
+fft_plot_noise = FFTVisualizerPG("Noise Signal FFT", fft_size=256, fs=fs)
 fft_layout.addWidget(fft_plot_chirp)
+fft_layout.addWidget(fft_plot_noise)
 
 right_tabs.addTab(fft_tab, "FFT")
 # --- Plot history data ---
@@ -268,7 +291,7 @@ time_log, rms_log, az_log, el_log = [], [], [], []
 sim_time = 0.0
 last_printed_time = -1
 
-chirp_block = ChirpTopBlock(frame_size=frame_size)
+chirp_block = ChirpTopBlock(SNR=SNR, frame_size=frame_size)
 chirp_block.start()
 
 # --- Simulation and visualization steps ---
@@ -278,7 +301,7 @@ def simulation_step():
     # print(f"Qt invoked simulation_step every {dt_ms:.1f} ms")
     global sim_time, last_printed_time, az_filt, el_filt, ctrl_az, ctrl_el, az_err, el_err, az_err_norm, el_err_norm
     global el_feedback, el_speed, az_feedback, az_speed, search_mode
-    global rise_time_flag, rise_time, setling_time, rms_error, rise_time_ref
+    global rise_time_flag, rise_time, setling_time, rms_error, rise_time_ref, SNR_rec, SNR_rec_history
     global is_below_threshold, last_threshold_time
 
     sim_time += dt_sim
@@ -329,9 +352,13 @@ def simulation_step():
     I_chirp = np.array(chirp_block.get_I_chirp().level()) / target_distance
     Q_chirp = np.array(chirp_block.get_Q_chirp().level()) / target_distance
 
+    I_noise = np.array(chirp_block.get_I_noise().level()) / jammer_distance
+    Q_noise = np.array(chirp_block.get_Q_noise().level()) / jammer_distance
+
 
     # print(f"IQ I: {np.mean(iq_I):.2f}, Q: {np.mean(iq_Q):.2f}")
     iq_power_chirp = np.sqrt(I_chirp**2 + Q_chirp**2)
+    iq_power_noise = np.sqrt(I_noise**2 + Q_noise**2)
     # print(f"Chirp Power: {np.mean(iq_power_chirp):.2f}, Noise Power: {np.mean(iq_power_noise):.2f}")
 
     zU_vec = np.full(frame_size, zU * iq_power_chirp) 
@@ -339,10 +366,19 @@ def simulation_step():
     zL_vec = np.full(frame_size, zL * iq_power_chirp) 
     zR_vec = np.full(frame_size, zR * iq_power_chirp)
 
-    combU_vec = zU_vec
-    combD_vec = zD_vec
-    combL_vec = zL_vec
-    combR_vec = zR_vec
+    jU_vec = np.full(frame_size, JamU * iq_power_noise)
+    jD_vec = np.full(frame_size, JamD * iq_power_noise)
+    jL_vec = np.full(frame_size, JamL * iq_power_noise)
+    jR_vec = np.full(frame_size, JamR * iq_power_noise)
+
+    combU_vec = zU_vec + jU_vec
+    combD_vec = zD_vec + jD_vec
+    combL_vec = zL_vec + jL_vec
+    combR_vec = zR_vec + jR_vec
+
+    SNR_rec = 10 * np.log10((np.mean(zU_vec + zD_vec + zL_vec + zR_vec) / (np.mean(jU_vec + jD_vec + jL_vec + jR_vec))))
+    SNR_rec_history.append(SNR_rec)
+    SNR_rec = np.mean(SNR_rec_history[-50:])
 
     combined_signals = np.stack([combU_vec, combD_vec, combL_vec, combR_vec])
     if np.max(combined_signals) < search_threshold:
@@ -354,6 +390,7 @@ def simulation_step():
             search_mode = 1
     else:
         is_below_threshold = False
+        search_mode = 0
 
     az_ratio = np.clip(combR_vec / (combL_vec + SMALL_VALUE), SMALL_VALUE, LARGE_VALUE)
     el_ratio = np.clip(combU_vec / (combD_vec + SMALL_VALUE), SMALL_VALUE, LARGE_VALUE)
@@ -406,6 +443,7 @@ def visualization_step():
     rise_time_label.setText(f"Rise Time: {rise_time:.2f}s")
     setling_time_label.setText(f"Settling Time: {setling_time:.2f}s")
     search_mode_label.setText(f"Search Mode: {search_mode}")
+    recieved_SNR_label.setText(f"Received SJNR: {SNR_rec:.2f} dB")
 
     vis_errors.push_data(sim_time, rms_error, np.mean(ctrl_az), np.mean(ctrl_el))
     
@@ -423,6 +461,9 @@ def visualization_step():
         # Update chirp signal FFT
         chirp_signal = np.array(chirp_block.get_I_chirp().level()) + 1j * np.array(chirp_block.get_Q_chirp().level())
         fft_plot_chirp.push_signal(chirp_signal, fft_size)
+        # Update noise signal FFT
+        noise_signal = np.array(chirp_block.get_I_noise().level()) + 1j * np.array(chirp_block.get_Q_noise().level())
+        fft_plot_noise.push_signal(noise_signal, fft_size)
 
 
 

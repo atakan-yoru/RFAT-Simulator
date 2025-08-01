@@ -42,13 +42,30 @@ class PathUtils:
         az = np.arctan2(y, x)
         elev = np.arctan2(z, np.sqrt(x**2 + y**2))
         return np.array([rho, az, elev])
-
+    
+    @staticmethod
+    def repeat_paths(base_paths, N):
+        """Repeat the base path segments N times in sequence."""
+        repeated = []
+        for _ in range(N):
+            for seg in base_paths:
+                # Create a new PathSegment with the same parameters to avoid reference issues
+                repeated.append(PathSegment(
+                    seg.movement_type,
+                    start=list(seg.start),
+                    end=list(seg.end),
+                    dt=seg.dt,
+                    angular_speed=list(seg.original_angular_speed) if hasattr(seg, 'angular_speed') else None,
+                    rho_speed=seg.original_rho_speed if hasattr(seg, 'rho_speed') else None,
+                    linear_speed=seg.original_linear_speed if hasattr(seg, 'linear_speed') else None
+                ))
+        return repeated
 
 # --- Class to represent a single path segment ---
 
 class PathSegment:
     def __init__(self, movement_type, start, end, dt=1.0,
-                 linear_speed=None, angular_speed=None, rho_speed=None):
+                 linear_speed=None, angular_speed = None, rho_speed=None):
         """
         Parameters for a segment:
           - movement_type: "linear" or "spherical"
@@ -69,6 +86,7 @@ class PathSegment:
                 raise ValueError("For linear movement, provide start, end, and linear_speed.")
             self.start = np.array(start, dtype=float)
             self.end = np.array(end, dtype=float)
+            self.original_linear_speed = linear_speed
             self.linear_speed = linear_speed * dt
             # Internal state always in Cartesian coordinates.
             self.current = self.start.copy()
@@ -77,7 +95,9 @@ class PathSegment:
                 raise ValueError("For spherical movement, provide start, end, angular_speed, and rho_speed.")
             self.start = np.array(start, dtype=float)  # [ρ, azimuth, elevation]
             self.end = np.array(end, dtype=float)
-            self.angular_speed = angular_speed * dt
+            self.original_angular_speed = angular_speed
+            self.original_rho_speed = rho_speed
+            self.angular_speed = [angular_speed[0]*dt, angular_speed[1]*dt]
             self.rho_speed = rho_speed * dt
             # Internal state in spherical coordinates.
             self.current = self.start.copy()
@@ -100,10 +120,10 @@ class PathSegment:
                 angle_diff = self.end[idx] - self.current[idx]
                 # Normalize the difference to be within -pi to pi
                 angle_diff = np.arctan2(np.sin(angle_diff), np.cos(angle_diff))
-                if abs(angle_diff) <= self.angular_speed:
+                if abs(angle_diff) <= self.angular_speed[idx-1]:
                     self.current[idx] = self.end[idx]
                 else:
-                    self.current[idx] += np.sign(angle_diff) * self.angular_speed
+                    self.current[idx] += np.sign(angle_diff) * self.angular_speed[idx-1]
 
             # Update the radial component (index 0)
             rho_diff = self.end[0] - self.current[0]
@@ -190,6 +210,9 @@ class Target:
         self.position = seg.get_cartesian()
         self.history.append(self.position.copy())
 
+    def get_distance(self):
+        return np.linalg.norm(self.position)   
+
 class OrientationUtils:
     @staticmethod
     def quat_to_vector(obj):
@@ -241,6 +264,7 @@ class Antenna:
         self.tip_point = OrientationUtils.quat_to_vector(self) + self.position
         self.signal_strength = 0
         self.beamwidth = beamwidth
+        self.target_distance = 0
 
     def update_global_transform(self):
         """Updates global position and orientation based on antenna plane transformation."""
@@ -282,9 +306,9 @@ class Antenna:
 
     def receive_signal(self, target):
         """Computes received signal strength based on inverse distance."""
-        distance = np.linalg.norm(target.position  - self.tip_point)
+        self.target_distance = np.linalg.norm(target.position  - self.tip_point)
         error_angle, gain = self.compute_gain(target, self.beamwidth)
-        self.signal_strength = gain * 1 / distance if distance != 0 else 1
+        self.signal_strength = gain * 1 / self.target_distance if self.target_distance != 0 else 1
         return self.signal_strength
 
     def signal_vector(self):

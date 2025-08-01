@@ -10,7 +10,7 @@ from scipy.spatial.transform import Rotation as R
 import pyqtgraph as pg
 
 class ConstellationVisualizerPG(QtWidgets.QWidget):
-    def __init__(self, title, frame_size=1024, history_frames=5, point_color=(0, 180, 255), refresh_ms=100, xlim=(-10, 10), ylim=(-10, 10)):
+    def __init__(self, title, frame_size=1024, history_frames=5, point_color=(0, 180, 255), refresh_ms=100, xlim=(-4, 4), ylim=(-4, 4)):
         super().__init__()
         self.frame_size = frame_size
         self.history_frames = history_frames
@@ -71,7 +71,7 @@ class ConstellationVisualizerPG(QtWidgets.QWidget):
 
 
 class System3DVisualizerPG(QtWidgets.QWidget):
-    def __init__(self, parent=None, mesh_res=12, show_gain_meshes=True):
+    def __init__(self, parent=None, mesh_res=12, show_gain_meshes=True, show_est_vector=False):
         super().__init__(parent)
         self.view = gl.GLViewWidget()
         self.base_axes = self._make_axes(length=1.0)
@@ -83,14 +83,15 @@ class System3DVisualizerPG(QtWidgets.QWidget):
         self.home_button = QtWidgets.QPushButton("Home View")
         self.home_button.clicked.connect(self.reset_view)
         layout.addWidget(self.home_button)
-
+        self.show_est_vector = show_est_vector
         self.setLayout(layout)
 
         self.mesh_res = mesh_res
         self._init_geometry()
         self.ant_meshes = []
         self.boresights = []
-        self.target = None
+        self.target_items = []
+        self.target_paths = []
         self.path = gl.GLLinePlotItem()
         self.view.addItem(self.path)
         self.est_vector = gl.GLLinePlotItem()
@@ -158,7 +159,7 @@ class System3DVisualizerPG(QtWidgets.QWidget):
         self.view.setCameraPosition(distance=15, elevation=30, azimuth=45)
 
 
-    def bind_plane(self, antenna_plane):
+    def bind_plane(self, antenna_plane, num_targets=1):
         for ant in antenna_plane.antennas:
             if self.show_gain_meshes:
                 dummy = np.zeros_like(self._base_pts)
@@ -180,11 +181,24 @@ class System3DVisualizerPG(QtWidgets.QWidget):
             self.boresights.append(boresight)
 
         # Add target as a sphere
-        self.target = gl.GLScatterPlotItem(pos=np.array([[0, 0, 0]]),
-                                           size=10, color=(0, 1, 0, 1))
-        self.view.addItem(self.target)
+        colors = [
+                    (0, 1, 0, 1),  # red
+                    (1, 0, 0, 1),  # green
+                    (0, 0, 1, 1),  # blue
+                    (1, 1, 0, 1),  # yellow
+                    (1, 0, 1, 1),  # magenta
+                    (0, 1, 1, 1),  # cyan
+                    (1, 0.5, 0, 1),# orange
+                    (0.5, 0, 1, 1) # purple
+                ]
+        
+        for i in range(num_targets):
+            color = colors[i % len(colors)]
+            target_item = gl.GLScatterPlotItem(pos=np.array([[0, 0, 0]]), size=10, color=color)
+            self.view.addItem(target_item)
+            self.target_items.append(target_item)
 
-    def push_state(self, target, antennas, plane=None, estimated_direction=None):
+    def push_state(self, targets, antennas, plane=None, estimated_direction=None):
         # Boresight
         boresight_color = (1.0, 0.5, 0.0, 1)      # orange
         # Plane normal
@@ -207,11 +221,37 @@ class System3DVisualizerPG(QtWidgets.QWidget):
             line = np.array([ant.position, ant.position + vec])
             self.boresights[i].setData(pos=line, color=boresight_color)
 
-        self.target.setData(pos=np.array([target.position]), color=path_color)
+                # Colors for targets (same as above)
+        colors = [
+            (0, 1, 0, 1), (1, 0, 0, 1), (0, 0, 1, 1), (1, 1, 0, 1),
+            (1, 0, 1, 1), (0, 1, 1, 1), (1, 0.5, 0, 1), (0.5, 0, 1, 1)
+        ]
 
-        if hasattr(target, 'history') and len(target.history) > 1:
-            H = np.array(target.history)
-            self.path.setData(pos=H, color=path_color, width=2, mode='line_strip')
+        # Update or add target items as needed
+        while len(self.target_items) < len(targets):
+            color = colors[len(self.target_items) % len(colors)]
+            target_item = gl.GLScatterPlotItem(pos=np.array([[0, 0, 0]]), size=10, color=color)
+            self.view.addItem(target_item)
+            self.target_items.append(target_item)
+        # Remove extra target items if any
+        while len(self.target_items) > len(targets):
+            item = self.target_items.pop()
+            self.view.removeItem(item)
+
+
+        for path_item in self.target_paths:
+            self.view.removeItem(path_item)
+        self.target_paths = []
+
+        for i, target in enumerate(targets):
+            color = colors[i % len(colors)]
+            self.target_items[i].setData(pos=np.array([target.position]), color=color)
+            # Optionally, plot history as a path for each target
+            if hasattr(target, 'history') and len(target.history) > 1:
+                H = np.array(target.history)
+                path_item = gl.GLLinePlotItem(pos=H, color=color, width=2, mode='line_strip')
+                self.view.addItem(path_item)
+                self.target_paths.append(path_item)  # <-- Add this line
 
         if plane is not None:
             # --- Draw antenna plane surface ---
@@ -234,13 +274,15 @@ class System3DVisualizerPG(QtWidgets.QWidget):
             self.plane_normal.setData(pos=np.array([start, end]), color=plane_normal_color, width=2, mode='lines')
 
 
-        if estimated_direction is not None:
+        if estimated_direction is not None and self.show_est_vector:
             ed = np.array(estimated_direction)
             if np.linalg.norm(ed) != 0:
                 ed = ed / np.linalg.norm(ed)
             origin = plane.origin if plane else np.zeros(3)
             self.est_vector.setData(pos=np.array([origin, origin + ed * 2]),
                                     color=(0.5, 0.5, 0.5, 1), width=2, mode='lines')
+        else:
+            self.est_vector.setData(pos=np.zeros((0, 3)))
 
 class SignalTimeVisualizer(QtWidgets.QWidget):
     def __init__(self, max_points=300):
@@ -285,3 +327,43 @@ class SignalTimeVisualizer(QtWidgets.QWidget):
         self.curves["rms"].setData(self.time, self.rms)
         self.curves["az"].setData(self.time, self.az)
         self.curves["el"].setData(self.time, self.el)
+
+class FFTVisualizerPG(QtWidgets.QWidget):
+    def __init__(self, title="FFT", fft_size=256, fs=25):
+        super().__init__()
+        self.fft_size = fft_size
+        self.fs = fs
+
+        layout = QtWidgets.QVBoxLayout()
+        self.setLayout(layout)
+
+        self.label = QtWidgets.QLabel(title)
+        layout.addWidget(self.label)
+
+        self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setBackground('w')
+        self.plot_widget.setLabel('bottom', 'Frequency (Hz)')
+        self.plot_widget.setLabel('left', 'Magnitude (dB)')
+        self.plot_widget.showGrid(x=True, y=True)
+        layout.addWidget(self.plot_widget)
+
+        self.curve = self.plot_widget.plot(pen='b')
+        self._last_signal = None
+        self._last_fft_size = fft_size
+
+    def push_signal(self, signal, fft_size=None):
+        """Update the FFT plot with a new signal and optional FFT size."""
+        if fft_size is not None:
+            self.fft_size = fft_size
+        self._last_signal = signal
+        self._last_fft_size = self.fft_size
+        self._update_plot()
+
+    def _update_plot(self):
+        if self._last_signal is None:
+            return
+        fft_data = np.fft.fftshift(np.fft.fft(self._last_signal, n=self._last_fft_size))
+        freq = np.fft.fftshift(np.fft.fftfreq(self._last_fft_size, d=1/self.fs))
+        mag = 20 * np.log10(np.abs(fft_data) + 1e-12)
+        self.curve.setData(freq, mag)
+        self.plot_widget.setXRange(-self.fs/2, self.fs/2)

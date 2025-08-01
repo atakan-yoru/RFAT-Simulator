@@ -4,12 +4,11 @@ import numpy as np
 class BluetoothReader(QThread):
     feedback_received = pyqtSignal(str, float)  # (axis, value)
 
-    def __init__(self, serial_obj, axis, get_speed_func, search_mode_func):
+    def __init__(self, serial_obj, axis, getter_func):
         super().__init__()
         self.serial = serial_obj
         self.axis = axis
-        self.get_speed = get_speed_func
-        self.get_searh = search_mode_func
+        self.getter = getter_func
         self.buffer = ""
         self.running = True
 
@@ -20,9 +19,8 @@ class BluetoothReader(QThread):
 
         while self.running:
             try:
-                speed = self.get_speed()
-                search_mode = self.get_searh()
-                self.serial.write(f"{search_mode},{speed:.2f}\n".encode())
+                mes_string = self.getter()
+                self.serial.write((mes_string+'\n').encode())
                 data = self.serial.read(self.serial.in_waiting).decode(errors='ignore')
                 self.buffer += data
 
@@ -37,7 +35,7 @@ class BluetoothReader(QThread):
 
             except Exception as e:
                 print(f"[BT {self.axis.upper()}] Error: {e}")
-            self.msleep(10)
+            self.msleep(2)
 
     def stop(self):
         self.running = False

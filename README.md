@@ -2,6 +2,8 @@
 
 This repository contains a **Python-based simulation framework and visualizer** for the RF-Based Antenna Tracking System (RFATS). The goal of this project is to **evaluate and tune system performance in realistic conditions** (e.g., noise, jamming, attenuation) **without relying on costly and time-consuming physical tests** as a prior assesment.
 
+![Simulation](assets/simulation.png)
+
 ## Overview
 
 - **Purpose:**  
@@ -18,4 +20,5 @@ This repository contains a **Python-based simulation framework and visualizer** 
 
 - GNU Radio based radioconda python interpreter (python 3.x)
 - Dependencies listed in `requirements.txt`  
+
 

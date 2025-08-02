@@ -282,37 +282,30 @@ class Antenna:
         where theta is the error angle between the antenna's boresight and the direction
         to the target. The exponent n is computed such that the gain is 0.5 at theta = beamwidth/2.
         """
-        # Get the antenna's boresight (forward) direction as a unit vector.
         boresight = OrientationUtils.quat_to_vector(antenna)
         boresight = boresight / np.linalg.norm(boresight)
         
-        # Compute the unit vector from the antenna's position to the target.
         vec_to_target = target.position - antenna.position
         vec_to_target /= np.linalg.norm(vec_to_target)
         
-        # Compute the angle between the boresight and the target direction.
         cos_theta = np.clip(np.dot(boresight, vec_to_target), -1.0, 1.0)
         theta = np.arccos(cos_theta)  # in radians
         error_angle_deg = np.degrees(theta)
-        
-        # Convert beamwidth to radians.
+
         beamwidth_rad = np.deg2rad(beamwidth_deg)
         n = np.log(0.5) / np.log(np.cos(beamwidth_rad / 2))
         gain = (cos_theta ** n) if abs(error_angle_deg) < 90 else 0.0
 
-        # print(f"Gain: {gain:.5f}, Error Angle: {error_angle_deg:.2f}°")
         
         return error_angle_deg, gain
 
     def receive_signal(self, target):
-        """Computes received signal strength based on inverse distance."""
         self.target_distance = np.linalg.norm(target.position  - self.tip_point)
         error_angle, gain = self.compute_gain(target, self.beamwidth)
         self.signal_strength = gain * 1 / self.target_distance if self.target_distance != 0 else 1
         return self.signal_strength
 
     def signal_vector(self):
-        """Computes the signal strength vector using quaternion rotation."""
         return self.signal_strength * OrientationUtils.quat_to_vector(self)
 
 class AntennaPlane:
@@ -325,22 +318,12 @@ class AntennaPlane:
         self.current_elevation = np.deg2rad(90.0)
 
     def add_antenna(self, antenna):
-        """Adds an antenna to the plane."""
         self.antennas.append(antenna)
 
     def compute_normal(self):
-        """Computes the normal to the antenna plane using quaternion transformations."""
         return np.array(OrientationUtils.quat_to_vector(self), dtype=np.float64)
     
     def set_initial_orientation(self, azimuth, elevation):
-        """
-        Sets the initial orientation of the antenna plane to a desired pose.
-        Updates all attached antennas and local azimuth/elevation vectors.
-
-        Parameters:
-        - desired_orientation: A list of Euler angles [roll, pitch, yaw] in degrees.
-        """
-        # Update the plane's orientation
 
         azimuth= np.deg2rad(azimuth)
         elevation = np.deg2rad(elevation)
@@ -348,13 +331,11 @@ class AntennaPlane:
         delta_azimuth = azimuth - self.current_azimuth
         delta_elevation = elevation - self.current_elevation
 
-        # Update the stored target angles.
         self.current_azimuth = azimuth % (2 * np.pi)
         self.current_elevation = elevation % np.pi
 
         azimuth_rotation = R.from_euler('z', delta_azimuth, degrees=False)
 
-        # Step 2: Get the current local azimuth and elevation unit vectors from the plane's orientation.
         local_azimuth_vector, _ = OrientationUtils.get_local_azimuth_elevation_vectors(self)
         
         # Check for degenerate case: if the plane's forward (normal) vector is nearly [0, 0, 1],
@@ -364,21 +345,15 @@ class AntennaPlane:
         if np.linalg.norm(forward - np.array([0.0, 0.0, 1.0])) < 1e-6:
             local_azimuth_vector = azimuth_rotation.apply(np.array([1.0, 0.0, 0.0]))
 
-        # Step 3: Create the relative elevation (pitch) rotation about the computed azimuth vector.
         elevation_rotation = R.from_rotvec(-delta_elevation * local_azimuth_vector)
 
-        # Step 4: Combine the relative rotations with the current orientation.
         new_rotation =   elevation_rotation * azimuth_rotation * R.from_quat(self.orientation)
         
-        # Update the antenna plane's orientation.
         self.orientation = new_rotation.as_quat()
 
-        # Update the transformations for all attached antennas.
         for antenna in self.antennas:
             antenna.update_global_transform()
         
-
-        # Update local azimuth and elevation vectors
         azimuth_vector, elevation_vector = OrientationUtils.get_local_azimuth_elevation_vectors(self)
         print("Updated Azimuth Vector:", azimuth_vector)
         print("Updated Elevation Vector:", elevation_vector)
@@ -394,23 +369,16 @@ class AntennaPlane:
         Instead of applying the absolute new angles, the function computes the differences 
         (delta angles) relative to the previously stored target angles and applies only those differences.
         """
-        # Compute the difference between the new and current angles.
+
         delta_azimuth = new_azimuth_angle - self.current_azimuth
         delta_elevation = new_elevation_angle - self.current_elevation
 
-        # Update the stored target angles.
-        # self.current_azimuth = np.clip(new_azimuth_angle, 0, 2*np.pi)
-        # self.current_elevation = np.clip(new_elevation_angle, 0, np.pi)
 
         self.current_azimuth = new_azimuth_angle % (2 * np.pi)
         self.current_elevation = new_elevation_angle % np.pi
-        # self.current_azimuth = new_azimuth_angle
-        # self.current_elevation = new_elevation_angle
 
-        # Step 1: Create the relative azimuth (yaw) rotation about the global Z-axis.
         azimuth_rotation = R.from_euler('z', delta_azimuth, degrees=False)
 
-        # Step 2: Get the current local azimuth and elevation unit vectors from the plane's orientation.
         local_azimuth_vector, _ = OrientationUtils.get_local_azimuth_elevation_vectors(self)
         
         # Check for degenerate case: if the plane's forward (normal) vector is nearly [0, 0, 1],
@@ -420,16 +388,10 @@ class AntennaPlane:
         if np.linalg.norm(forward - np.array([0.0, 0.0, 1.0])) < 1e-6:
             local_azimuth_vector = azimuth_rotation.apply(np.array([1.0, 0.0, 0.0]))
 
-        # Step 3: Create the relative elevation (pitch) rotation about the computed azimuth vector.
         elevation_rotation = R.from_rotvec(-delta_elevation * local_azimuth_vector)
-
-        # Step 4: Combine the relative rotations with the current orientation.
         new_rotation =  azimuth_rotation* elevation_rotation * R.from_quat(self.orientation)
-        
-        # Update the antenna plane's orientation.
         self.orientation = new_rotation.as_quat()
 
-        # Update the transformations for all attached antennas.
         for antenna in self.antennas:
             antenna.update_global_transform()
 
@@ -441,20 +403,16 @@ class DecisionSubsystem:
         self.norm = None
 
     def update_antenna_plane(self, antenna_plane):
-        """Updates the antenna plane reference."""
         self.antenna_plane = antenna_plane
 
     def compute_direction(self):
-        """Estimates the target's direction based on signal vectors. 3D vector averaging is used."""
         self.total_vector = sum(antenna.signal_vector() for antenna in self.antenna_plane.antennas)
         return self.total_vector  # No normalization to keep raw values
         
     def compute_direction_projection(self):
-        """Projects the estimated direction onto the antenna plane without normalizing."""
         estimated_direction = self.compute_direction()
         normal = self.antenna_plane.compute_normal()
         
-        # Project the estimated direction onto the plane
         self.projection = estimated_direction - np.dot(estimated_direction, normal) * normal
 
         return self.projection  # Returning the raw projection without normalization
@@ -469,14 +427,13 @@ class DecisionSubsystem:
         - elevation_magnitude: The component in the up-down direction (along the plane's local elevation vector).
         """
         if self.projection is None:
-            self.compute_direction_projection()  # Ensure projection is calculated
+            self.compute_direction_projection()
 
-        # Retrieve the local azimuth (right) and elevation (up) unit vectors from the antenna plane's orientation.
+        
         azimuth_vector, elevation_vector = OrientationUtils.get_local_azimuth_elevation_vectors(self.antenna_plane)
         print("Azimuth Vector: ", azimuth_vector)
         print("Elevation Vector: ", elevation_vector)
 
-        # Compute the signal components along the local azimuth and elevation axes.
 
         azimuth_magnitude = np.dot(self.projection, azimuth_vector)
         elevation_magnitude = np.dot(self.projection, elevation_vector)
@@ -495,7 +452,6 @@ class PIDController:
         self.integral = 0
 
     def compute_control(self, error):
-        """Computes the control signal using PID logic."""
 
         self.integral += error 
         derivative = error - self.previous_error
@@ -504,7 +460,6 @@ class PIDController:
         return control_signal if abs(control_signal) > 1e-6 else 0
     
 class Motor:
-    """Base class for motors with PID control"""
     def __init__(self, angle=0 ,w=0, controller=None):
         self.angle =  angle # Current position
         self.w = w # Current velocity
@@ -549,8 +504,6 @@ class ActuationSubsystem:
         """
         self.antenna_plane = antenna_plane
         self.decision_system = decision_system
-
-        # Independent PID controllers for azimuth and elevation
         self.azimuth_motor = Motor(angle=0, controller=PIDController(kp=1, ki=0.1, kd=0))
         self.elevation_motor = Motor(angle=np.pi/2, controller=PIDController(kp=1, ki=0.1, kd=0))
         print(f"Azimuth Motor: Angle = {np.degrees(self.azimuth_motor.angle):.2f}, Elev Motor: Angle = {np.degrees(self.elevation_motor.angle):.2f}")
@@ -570,9 +523,6 @@ class ActuationSubsystem:
         return error_angle
 
     def actuate_system(self, dt=1):
-        """
-        Uses independent PID control for azimuth (DC motor) and elevation (Servo motor).
-        """
         self.decision_system.compute_direction_projection()
         azimuth_error, elevation_error = self.decision_system.decompose_direction()
         print(f"Azimuth Error: {np.degrees(azimuth_error):.2f}, Elevation Error: {np.degrees(elevation_error):.2f}")

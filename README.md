@@ -16,6 +16,6 @@ This repository contains a **Python-based simulation framework and visualizer** 
 
 ## Requirements
 
-- GNU Radio based radioconda python interpreter
+- GNU Radio based radioconda python interpreter (python 3.x)
 - Dependencies listed in `requirements.txt`  
 
